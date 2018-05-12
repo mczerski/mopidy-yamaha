@@ -5,6 +5,7 @@ from __future__ import unicode_literals
 import logging
 
 from mopidy import mixer
+from mopidy import core
 
 import pykka
 
@@ -13,6 +14,36 @@ from mopidy_yamaha import talker
 
 logger = logging.getLogger(__name__)
 
+
+class YamahaTalkerSingleton:
+    yamaha_talker = None
+
+    @classmethod
+    def start_yamaha_talker(cls, host, source, party_mode):
+        if cls.yamaha_talker is None:
+            cls.yamaha_talker = talker.YamahaTalker.start(
+                host=host,
+                source=source,
+                party_mode=party_mode,
+            )
+        return cls.yamaha_talker.proxy()
+
+class YamahaFrontend(pykka.ThreadingActor, core.CoreListener):
+    def __init__(self, config, core):
+        super(YamahaFrontend, self).__init__(config, core)
+
+        self.host = config['yamaha']['host']
+        self.source = config['yamaha']['source']
+        self.party_mode = config['yamaha']['party_mode']
+
+        self._yamaha_talker = None
+        
+    def on_start(self):
+        self._yamaha_talker = YamahaTalkerSingleton.start_yamaha_talker(self.host, self.source, self.party_mode)
+
+    def playback_state_changed(self, old_state, new_state):
+        if new_state == core.PlaybackState.PLAYING:
+            self._yamaha_talker.start_playback()
 
 class YamahaMixer(pykka.ThreadingActor, mixer.Mixer):
 
@@ -25,32 +56,35 @@ class YamahaMixer(pykka.ThreadingActor, mixer.Mixer):
         self.source = config['yamaha']['source']
         self.party_mode = config['yamaha']['party_mode']
 
-        self._volume_cache = 0
+        self._previous_volume = None
+        self._previous_mute = None
         self._yamaha_talker = None
 
     def get_volume(self):
-        return self._volume_cache
+        volume, mute = self._yamaha_talker.get_volume_mute().get()
+        if self._previous_volume != volume:
+            self.trigger_volume_changed(volume)
+        self._previous_volume = volume
+        if self._previous_mute != mute:
+            self.trigger_mute_changed(mute)
+        self._previous_mute = mute
+        return volume
+            
 
     def set_volume(self, volume):
-        self._volume_cache = volume
         self._yamaha_talker.set_volume(volume)
         self.trigger_volume_changed(volume)
         return True
 
     def get_mute(self):
-        return False
+        if self._previous_mute is None:
+            self.get_volume()
+        return self._previous_mute
 
     def set_mute(self, mute):
-        self._yamaha_talker.mute(mute)
+        self._yamaha_talker.set_mute(mute)
         self.trigger_mute_changed(mute)
 
     def on_start(self):
-        self._start_yamaha_talker()
+        self._yamaha_talker = YamahaTalkerSingleton.start_yamaha_talker(self.host, self.source, self.party_mode)
 
-    def _start_yamaha_talker(self):
-        self._yamaha_talker = talker.YamahaTalker.start(
-            host=self.host,
-            source=self.source,
-            party_mode=self.party_mode,
-        ).proxy()
-        self._volume_cache = self._yamaha_talker.get_volume().get()

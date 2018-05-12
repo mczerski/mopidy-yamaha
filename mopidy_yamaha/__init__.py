@@ -25,6 +25,7 @@ class Extension(ext.Extension):
         return schema
 
     def setup(self, registry):
-        from .mixer import YamahaMixer
+        from .mixer import YamahaMixer, YamahaFrontend
 
         registry.add('mixer', YamahaMixer)
+        registry.add('frontend', YamahaFrontend)

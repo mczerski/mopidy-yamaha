@@ -26,15 +26,20 @@ class YamahaTalker(pykka.ThreadingActor):
         self.party_mode = party_mode
 
         self._model = None
+        self._db_volume = None
 
     def on_start(self):
         self._get_device_model()
+
+    def start_playback(self):
         self._set_device_to_known_state()
+
+    def stop_playback(self):
+        self._power_device_off()
 
     def _set_device_to_known_state(self):
         self._power_device_on()
         self._select_input_source()
-        self.mute(False)
         self._set_party_mode()
 
     def _get_device_model(self):
@@ -44,8 +49,19 @@ class YamahaTalker(pykka.ThreadingActor):
         self._model = response['Config']['Model_Name']
         logger.info('Yamaha amplifier: Found device model "%s"', self._model)
 
+    def _is_device_on(self):
+        response = self._get('<Power_Control><Power>GetParam</Power></Power_Control>',
+                             zone='System')
+        status = response['Power_Control']['Power']
+        assert status in ["On", "Standby"]
+        return status == "On"
+
     def _power_device_on(self):
         self._put('<Power_Control><Power>On</Power></Power_Control>',
+                  zone='System')
+
+    def _power_device_off(self):
+        self._put('<Power_Control><Power>Standby</Power></Power_Control>',
                   zone='System')
 
     def _select_input_source(self):
@@ -59,7 +75,7 @@ class YamahaTalker(pykka.ThreadingActor):
                 '<Party_Mode><Mode>%s</Mode></Party_Mode>' % mode,
                 zone='System')
 
-    def mute(self, mute):
+    def set_mute(self, mute):
         request = '<Volume><Mute>%s</Mute></Volume>'
         if mute:
             self._put(request % 'On')
@@ -68,17 +84,19 @@ class YamahaTalker(pykka.ThreadingActor):
             self._put(request % 'Off')
             return False
 
-    def get_volume(self):
+    def get_volume_mute(self):
         response = self._get('<Basic_Status>GetParam</Basic_Status>')
         volume = int(response['Basic_Status']['Volume']['Lvl']['Val'])
+        mute = bool(response['Basic_Status']['Volume']['Mute'] == u"On")
         percentage_volume = (
             -(volume - self._min_volume)
             / float(self._min_volume)
             ) * 100
-        logger.info(
-            'Yamaha amplifier: Volume is "%d" (%d%%)',
-            volume, percentage_volume)
-        return int(percentage_volume)
+        return int(percentage_volume), mute
+
+    def get_volume(self):
+        volume, _ = self.get_volume_mute()
+        return volume
 
     def set_volume(self, volume):
         db_volume = (
@@ -88,6 +106,10 @@ class YamahaTalker(pykka.ThreadingActor):
         logger.debug(
             'Yamaha amplifier: Set volume to "%d" (%d%%)',
             db_volume, volume)
+        self._db_volume = db_volume
+        self._set_volume(db_volume)
+
+    def _set_volume(self, db_volume):
         self._put('''<Volume>
                 <Lvl><Val>%d</Val><Exp>1</Exp><Unit>dB</Unit></Lvl>
             </Volume>''' % db_volume)
